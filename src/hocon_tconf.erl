@@ -617,7 +617,7 @@ map_field(?UNION(Types0, _), Schema0, Value, Opts) ->
                 Schema = sub_schema(Schema0, Type),
                 map_field(Type, Schema, Value, Opts)
             end,
-            case do_map_union(Types, F, #{}, Opts) of
+            case do_map_union(Types, F, #{}, Types0, Opts) of
                 {ok, {Mapped, NewValue}} -> {Mapped, NewValue};
                 Errors -> {Errors, Value}
             end
@@ -796,18 +796,22 @@ select_union_members(Types, Value, Opts) when is_function(Types) ->
             throw({select_union_members, Reason, St})
     end.
 
-do_map_union([], _TypeCheck, PerTypeResult, Opts) ->
+do_map_union([], _TypeCheck, PerTypeResult, UnionType, Opts) ->
     case maps:size(PerTypeResult) of
         1 ->
             [{ReadableType, Err}] = maps:to_list(PerTypeResult),
-            validation_errs(Opts, ensure_type_path(Err, ReadableType));
+            ErrorContext0 = ensure_type_path(Err, ReadableType),
+            ErrorContext = maybe_map_union_error(ErrorContext0, UnionType, Opts),
+            validation_errs(Opts, ErrorContext);
         _ ->
-            validation_errs(Opts, #{
+            ErrorContext0 = #{
                 reason => matched_no_union_member,
                 mismatches => PerTypeResult
-            })
+            },
+            ErrorContext = maybe_map_union_error(ErrorContext0, UnionType, Opts),
+            validation_errs(Opts, ErrorContext)
     end;
-do_map_union([Type | Types], TypeCheck, PerTypeResult, Opts) ->
+do_map_union([Type | Types], TypeCheck, PerTypeResult, UnionType, Opts) ->
     {Mapped, Value} = TypeCheck(Type),
     case find_errors(Mapped) of
         ok ->
@@ -817,9 +821,23 @@ do_map_union([Type | Types], TypeCheck, PerTypeResult, Opts) ->
                 Types,
                 TypeCheck,
                 PerTypeResult#{readable_type(Type) => maybe_hd(Reasons)},
+                UnionType,
                 Opts
             )
     end.
+
+maybe_map_union_error(ErrorContext0, UnionType, Opts) when is_function(UnionType, 1) ->
+    try UnionType(map_error) of
+        ErrorMapFn when is_function(ErrorMapFn, 2) ->
+            ErrorMapFn(ErrorContext0, Opts);
+        _ ->
+            ErrorContext0
+    catch
+        error:function_clause ->
+            ErrorContext0
+    end;
+maybe_map_union_error(ErrorContext, _UnionType, _Opts) ->
+    ErrorContext.
 
 do_map_array(_F, [], Elems, _Index, Acc) ->
     {ok, {lists:reverse(Elems), Acc}};
